@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rodio = { path = "../rodio" }
+rodio = { git="https://github.com/RustAudio/rodio",branch="master" }
