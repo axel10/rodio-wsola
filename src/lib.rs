@@ -799,6 +799,10 @@ where
         self.speed
     }
 
+    pub fn into_inner(self) -> I {
+        self.input
+    }
+
     fn ensure_state(&mut self) -> &mut WsolaState {
         let channels = self.input.channels().get() as usize;
         let sample_rate = self.input.sample_rate().get();
