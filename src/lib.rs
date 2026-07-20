@@ -118,7 +118,7 @@ fn decimated_search(
 
     n += decimation;
     if n >= num_candidate_blocks {
-        return if similarity[1] > similarity[0] { decimation } else { 0 };
+        return if similarity[1] > similarity[0] { decimation.min(num_candidate_blocks - 1) } else { 0 };
     }
 
     while n < num_candidate_blocks {
@@ -148,13 +148,13 @@ fn decimated_search(
             
             let in_exclude = candidate_index >= exclude_interval.0 && candidate_index <= exclude_interval.1;
             if candidate_similarity > best_similarity && !in_exclude {
-                optimal_index = candidate_index.max(0) as usize;
+                optimal_index = (candidate_index.max(0) as usize).min(num_candidate_blocks - 1);
                 best_similarity = candidate_similarity;
             }
         } else if n + decimation >= num_candidate_blocks {
             let in_exclude = (n as isize) >= exclude_interval.0 && (n as isize) <= exclude_interval.1;
             if similarity[2] > best_similarity && !in_exclude {
-                optimal_index = n;
+                optimal_index = n.min(num_candidate_blocks - 1);
                 best_similarity = similarity[2];
             }
         }
@@ -164,7 +164,7 @@ fn decimated_search(
         n += decimation;
     }
 
-    optimal_index
+    optimal_index.min(num_candidate_blocks - 1)
 }
 
 fn full_search(
@@ -368,6 +368,7 @@ struct WsolaState {
     input_buffer_added_silence: usize,
     energy_candidate_blocks: Vec<f32>,
     optimal_index: usize,
+    is_final: bool,
 }
 
 impl WsolaState {
@@ -379,8 +380,10 @@ impl WsolaState {
         ola_window_size_ms: f32,
         wsola_search_interval_ms: f32,
     ) -> Self {
-        let num_candidate_blocks = (wsola_search_interval_ms * sample_rate as f32 / 1000.0) as usize;
+        let mut num_candidate_blocks = (wsola_search_interval_ms * sample_rate as f32 / 1000.0) as usize;
+        num_candidate_blocks = num_candidate_blocks.max(1);
         let mut ola_window_size = (ola_window_size_ms * sample_rate as f32 / 1000.0) as usize;
+        ola_window_size = ola_window_size.max(2);
         ola_window_size += ola_window_size & 1;
         let ola_hop_size = ola_window_size / 2;
 
@@ -431,6 +434,7 @@ impl WsolaState {
             input_buffer_added_silence: 0,
             energy_candidate_blocks,
             optimal_index: 0,
+            is_final: false,
         }
     }
 
@@ -447,6 +451,7 @@ impl WsolaState {
         self.num_complete_frames = 0;
         self.wsola_output_started = false;
         self.muted_partial_frame = 0.0;
+        self.is_final = false;
     }
 
     fn input_buffer_frames(&self) -> usize {
@@ -464,8 +469,9 @@ impl WsolaState {
     }
 
     fn set_final(&mut self) {
-        if self.input_buffer_final_frames == 0 {
+        if !self.is_final {
             self.input_buffer_final_frames = self.input_buffer_frames();
+            self.is_final = true;
         }
     }
 
@@ -543,7 +549,16 @@ impl WsolaState {
         self.target_block_index = (self.optimal_index + self.ola_hop_size) as isize;
     }
 
+    fn clamp_playback_rate(&self, rate: f32) -> f32 {
+        if rate.is_nan() || rate <= 0.0 {
+            1.0
+        } else {
+            rate.clamp(self.min_playback_rate, self.max_playback_rate)
+        }
+    }
+
     fn get_updated_time(&self, playback_rate: f32) -> f64 {
+        let playback_rate = self.clamp_playback_rate(playback_rate);
         self.output_time + self.ola_hop_size as f64 * playback_rate as f64
     }
 
@@ -552,6 +567,7 @@ impl WsolaState {
     }
 
     fn frames_needed(&self, playback_rate: f32) -> isize {
+        let playback_rate = self.clamp_playback_rate(playback_rate);
         let next_time = self.get_updated_time(playback_rate);
         let search_idx = self.get_search_block_index(next_time);
         
@@ -562,10 +578,12 @@ impl WsolaState {
     }
 
     fn can_perform_wsola(&self, playback_rate: f32) -> bool {
+        let playback_rate = self.clamp_playback_rate(playback_rate);
         self.frames_needed(playback_rate) <= 0
     }
 
     fn add_input_buffer_final_silence(&mut self, playback_rate: f32) {
+        let playback_rate = self.clamp_playback_rate(playback_rate);
         let needed = self.frames_needed(playback_rate);
         if needed <= 0 {
             return;
@@ -580,6 +598,7 @@ impl WsolaState {
     }
 
     fn run_one_wsola_iteration(&mut self, playback_rate: f32) -> bool {
+        let playback_rate = self.clamp_playback_rate(playback_rate);
         if !self.can_perform_wsola(playback_rate) {
             return false;
         }
@@ -665,30 +684,10 @@ impl WsolaState {
     }
 
     fn fill_buffer(&mut self, dest: &mut [Vec<f32>], dest_size: usize, playback_rate: f32) -> usize {
-        if playback_rate == 0.0 {
-            return 0;
-        }
+        let playback_rate = self.clamp_playback_rate(playback_rate);
 
         if self.input_buffer_final_frames > 0 {
             self.add_input_buffer_final_silence(playback_rate);
-        }
-
-        if playback_rate < self.min_playback_rate
-            || (self.max_playback_rate > 0.0 && playback_rate > self.max_playback_rate)
-        {
-            let frames_to_render = dest_size.min(
-                (self.input_buffer_frames() as f32 / playback_rate) as usize
-            );
-
-            self.muted_partial_frame += frames_to_render as f64 * playback_rate as f64;
-            let seek_frames = self.muted_partial_frame.floor() as usize;
-            
-            for ch in 0..self.channels {
-                dest[ch][0..frames_to_render].fill(0.0);
-            }
-            self.seek_buffer(seek_frames);
-            self.muted_partial_frame -= seek_frames as f64;
-            return frames_to_render;
         }
 
         let slower_step = (self.ola_window_size as f32 * playback_rate).ceil() as usize;
@@ -742,6 +741,9 @@ where
     ola_window_size_ms: f32,
     wsola_search_interval_ms: f32,
 
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
+
     state: Option<WsolaState>,
     
     output_samples: Vec<rodio::Sample>,
@@ -755,13 +757,21 @@ where
     I: Source,
 {
     pub fn new(input: I, speed: f32) -> Self {
+        let channels = input.channels();
+        let sample_rate = input.sample_rate();
+        let speed = if speed.is_nan() || speed <= 0.0 { 1.0 } else { speed };
+        let min_playback_rate = 0.25;
+        let max_playback_rate = 8.0;
+        let speed = speed.clamp(min_playback_rate, max_playback_rate);
         Self {
             input,
             speed,
-            min_playback_rate: 0.25,
-            max_playback_rate: 8.0,
+            min_playback_rate,
+            max_playback_rate,
             ola_window_size_ms: 12.0,
             wsola_search_interval_ms: 40.0,
+            channels,
+            sample_rate,
             state: None,
             output_samples: Vec::new(),
             output_samples_pos: 0,
@@ -771,12 +781,42 @@ where
 
     pub fn with_params(
         input: I,
-        speed: f32,
-        min_playback_rate: f32,
-        max_playback_rate: f32,
-        ola_window_size_ms: f32,
-        wsola_search_interval_ms: f32,
+        mut speed: f32,
+        mut min_playback_rate: f32,
+        mut max_playback_rate: f32,
+        mut ola_window_size_ms: f32,
+        mut wsola_search_interval_ms: f32,
     ) -> Self {
+        let channels = input.channels();
+        let sample_rate = input.sample_rate();
+
+        if min_playback_rate.is_nan() || min_playback_rate <= 0.0 {
+            min_playback_rate = 0.25;
+        } else {
+            min_playback_rate = min_playback_rate.max(0.01);
+        }
+
+        if max_playback_rate.is_nan() || max_playback_rate < min_playback_rate {
+            max_playback_rate = min_playback_rate.max(8.0);
+        }
+
+        if speed.is_nan() || speed <= 0.0 {
+            speed = 1.0;
+        }
+        speed = speed.clamp(min_playback_rate, max_playback_rate);
+
+        if ola_window_size_ms.is_nan() || ola_window_size_ms <= 0.0 {
+            ola_window_size_ms = 12.0;
+        } else {
+            ola_window_size_ms = ola_window_size_ms.max(1.0);
+        }
+
+        if wsola_search_interval_ms.is_nan() || wsola_search_interval_ms <= 0.0 {
+            wsola_search_interval_ms = 40.0;
+        } else {
+            wsola_search_interval_ms = wsola_search_interval_ms.max(1.0);
+        }
+
         Self {
             input,
             speed,
@@ -784,6 +824,8 @@ where
             max_playback_rate,
             ola_window_size_ms,
             wsola_search_interval_ms,
+            channels,
+            sample_rate,
             state: None,
             output_samples: Vec::new(),
             output_samples_pos: 0,
@@ -792,10 +834,11 @@ where
     }
 
     pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed;
+        let speed = if speed.is_nan() || speed <= 0.0 { 1.0 } else { speed };
+        self.speed = speed.clamp(self.min_playback_rate, self.max_playback_rate);
     }
 
-    pub fn speed(&self) -> f32 {
+    pub fn playback_speed(&self) -> f32 {
         self.speed
     }
 
@@ -807,12 +850,18 @@ where
         let channels = self.input.channels().get() as usize;
         let sample_rate = self.input.sample_rate().get();
         
-        let needs_init = match &self.state {
-            None => true,
-            Some(s) => s.channels != channels || s.sample_rate != sample_rate,
-        };
+        assert_eq!(
+            channels,
+            self.channels.get() as usize,
+            "Wsola: input source channel count changed mid-stream"
+        );
+        assert_eq!(
+            sample_rate,
+            self.sample_rate.get(),
+            "Wsola: input source sample rate changed mid-stream"
+        );
 
-        if needs_init {
+        if self.state.is_none() {
             self.state = Some(WsolaState::new(
                 channels,
                 sample_rate,
@@ -912,9 +961,28 @@ where
             None
         }
     }
-}
 
-impl<I> ExactSizeIterator for Wsola<I> where I: Source + ExactSizeIterator {}
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let buffered = self.output_samples.len().saturating_sub(self.output_samples_pos);
+        let (lower, upper) = self.input.size_hint();
+        
+        let lower_scaled = if self.speed > 0.0 {
+            (lower as f32 / self.speed) as usize
+        } else {
+            lower
+        };
+        
+        let upper_scaled = upper.map(|u| {
+            if self.speed > 0.0 {
+                (u as f32 / self.speed) as usize
+            } else {
+                u
+            }
+        });
+        
+        (buffered.saturating_add(lower_scaled), upper_scaled.map(|u| buffered.saturating_add(u)))
+    }
+}
 
 impl<I> Source for Wsola<I>
 where
@@ -925,11 +993,11 @@ where
     }
 
     fn channels(&self) -> rodio::ChannelCount {
-        self.input.channels()
+        self.channels
     }
 
     fn sample_rate(&self) -> rodio::SampleRate {
-        self.input.sample_rate()
+        self.sample_rate
     }
 
     fn total_duration(&self) -> Option<Duration> {
@@ -956,3 +1024,189 @@ pub trait WsolaSourceExt: Source + Sized {
 }
 
 impl<I: Source> WsolaSourceExt for I {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockSource {
+        samples: Vec<rodio::Sample>,
+        pos: usize,
+        channels: u16,
+        sample_rate: u32,
+    }
+
+    impl Iterator for MockSource {
+        type Item = rodio::Sample;
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.pos < self.samples.len() {
+                let s = self.samples[self.pos];
+                self.pos += 1;
+                Some(s)
+            } else {
+                None
+            }
+        }
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.samples.len().saturating_sub(self.pos);
+            (remaining, Some(remaining))
+        }
+    }
+
+    impl Source for MockSource {
+        fn current_span_len(&self) -> Option<usize> {
+            Some(self.samples.len().saturating_sub(self.pos))
+        }
+        fn channels(&self) -> rodio::ChannelCount {
+            rodio::ChannelCount::new(self.channels).unwrap()
+        }
+        fn sample_rate(&self) -> rodio::SampleRate {
+            rodio::SampleRate::new(self.sample_rate).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, _pos: Duration) -> Result<(), SeekError> {
+            self.pos = 0;
+            Ok(())
+        }
+    }
+
+    struct ChangingMockSource {
+        samples: Vec<rodio::Sample>,
+        pos: usize,
+        channels: u16,
+        sample_rate: u32,
+        change_at: usize,
+        new_channels: u16,
+    }
+
+    impl Iterator for ChangingMockSource {
+        type Item = rodio::Sample;
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.pos < self.samples.len() {
+                let s = self.samples[self.pos];
+                self.pos += 1;
+                Some(s)
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Source for ChangingMockSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> rodio::ChannelCount {
+            if self.pos >= self.change_at {
+                rodio::ChannelCount::new(self.new_channels).unwrap()
+            } else {
+                rodio::ChannelCount::new(self.channels).unwrap()
+            }
+        }
+        fn sample_rate(&self) -> rodio::SampleRate {
+            rodio::SampleRate::new(self.sample_rate).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, _pos: Duration) -> Result<(), SeekError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_parameter_sanitization() {
+        let input = MockSource {
+            samples: vec![0.0 as rodio::Sample; 1000],
+            pos: 0,
+            channels: 2,
+            sample_rate: 44100,
+        };
+
+        // Negative/NaN/Zero speed clamps to 1.0 or bounds
+        let wsola_neg = Wsola::new(input, -1.5);
+        assert_eq!(wsola_neg.playback_speed(), 1.0); // Defaults to 1.0 for <= 0.0
+
+        let input = MockSource {
+            samples: vec![0.0 as rodio::Sample; 1000],
+            pos: 0,
+            channels: 2,
+            sample_rate: 44100,
+        };
+        let wsola_nan = Wsola::new(input, f32::NAN);
+        assert_eq!(wsola_nan.playback_speed(), 1.0); // Default to 1.0
+
+        let input = MockSource {
+            samples: vec![0.0 as rodio::Sample; 1000],
+            pos: 0,
+            channels: 2,
+            sample_rate: 44100,
+        };
+        let wsola_with_params = Wsola::with_params(
+            input,
+            12.0, // speed
+            0.5,  // min
+            4.0,  // max
+            -5.0, // window (invalid)
+            0.0,  // search (invalid)
+        );
+        assert_eq!(wsola_with_params.playback_speed(), 4.0); // Clamped to max
+        assert_eq!(wsola_with_params.ola_window_size_ms, 12.0); // default
+        assert_eq!(wsola_with_params.wsola_search_interval_ms, 40.0); // default
+    }
+
+    #[test]
+    fn test_speed_clamping() {
+        let input = MockSource {
+            samples: vec![0.0 as rodio::Sample; 4000],
+            pos: 0,
+            channels: 1,
+            sample_rate: 16000,
+        };
+
+        // Create Wsola with speed 10.0 (max is 8.0 by default)
+        let mut wsola = Wsola::new(input, 10.0);
+        assert_eq!(wsola.playback_speed(), 8.0); // Clamped to max
+
+        // Verify it runs and produces samples instead of silence or panic
+        let mut count = 0;
+        while let Some(_) = wsola.next() {
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Wsola: input source channel count changed mid-stream")]
+    fn test_channel_mismatch_panic() {
+        let input = ChangingMockSource {
+            samples: vec![0.0 as rodio::Sample; 1000],
+            pos: 0,
+            channels: 2,
+            sample_rate: 16000,
+            change_at: 200,
+            new_channels: 1,
+        };
+
+        let mut wsola = Wsola::new(input, 1.5);
+        // This will process samples and eventually panic when it crosses change_at
+        while let Some(_) = wsola.next() {}
+    }
+
+    #[test]
+    fn test_size_hint() {
+        let input = MockSource {
+            samples: vec![0.0 as rodio::Sample; 2000],
+            pos: 0,
+            channels: 2,
+            sample_rate: 44100,
+        };
+
+        let wsola = Wsola::new(input, 2.0);
+        let hint = wsola.size_hint();
+        // Since speed is 2.0 and input has 2000 samples, hint lower bound should be around 1000.
+        assert!(hint.0 >= 990 && hint.0 <= 1010);
+    }
+}
