@@ -1,6 +1,6 @@
 [package]
 name = "rodio-wsola"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A WSOLA (Waveform Similarity Overlap-Add) implementation for rodio sources to stretch audio time without altering pitch."
 license = "Apache-2.0"
