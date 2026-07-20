@@ -74,9 +74,9 @@ fn decimated_search(
     channels: usize,
     energy_target_block: &[f32],
     energy_candidate_blocks: &[f32],
+    dot_prod: &mut [f32],
 ) -> usize {
     let num_candidate_blocks = search_segment_frames - (target_block_frames - 1);
-    let mut dot_prod = vec![0.0_f32; channels];
     let mut similarity = [0.0_f32; 3];
 
     let mut n = 0;
@@ -85,10 +85,10 @@ fn decimated_search(
         search_segment, n,
         channels,
         target_block_frames,
-        &mut dot_prod,
+        dot_prod,
     );
     similarity[0] = similarity_measure(
-        &dot_prod,
+        dot_prod,
         energy_target_block,
         &energy_candidate_blocks[0..channels],
         channels,
@@ -107,10 +107,10 @@ fn decimated_search(
         search_segment, n,
         channels,
         target_block_frames,
-        &mut dot_prod,
+        dot_prod,
     );
     similarity[1] = similarity_measure(
-        &dot_prod,
+        dot_prod,
         energy_target_block,
         &energy_candidate_blocks[n * channels..(n + 1) * channels],
         channels,
@@ -127,10 +127,10 @@ fn decimated_search(
             search_segment, n,
             channels,
             target_block_frames,
-            &mut dot_prod,
+            dot_prod,
         );
         similarity[2] = similarity_measure(
-            &dot_prod,
+            dot_prod,
             energy_target_block,
             &energy_candidate_blocks[n * channels..(n + 1) * channels],
             channels,
@@ -178,8 +178,8 @@ fn full_search(
     channels: usize,
     energy_target_block: &[f32],
     energy_candidate_blocks: &[f32],
+    dot_prod: &mut [f32],
 ) -> usize {
-    let mut dot_prod = vec![0.0_f32; channels];
     let mut best_similarity = -f32::MAX;
     let mut optimal_index = 0;
 
@@ -194,11 +194,11 @@ fn full_search(
             search_block, n,
             channels,
             target_block_frames,
-            &mut dot_prod,
+            dot_prod,
         );
 
         let similarity = similarity_measure(
-            &dot_prod,
+            dot_prod,
             energy_target_block,
             &energy_candidate_blocks[n * channels..(n + 1) * channels],
             channels,
@@ -221,10 +221,11 @@ fn compute_optimal_index(
     energy_candidate_blocks: &mut [f32],
     channels: usize,
     exclude_interval: (isize, isize),
+    energy_target_block: &mut [f32],
+    dot_prod: &mut [f32],
 ) -> usize {
     let num_candidate_blocks = search_block_frames - (target_block_frames - 1);
     let search_decimation = 5;
-    let mut energy_target_block = vec![0.0_f32; channels];
 
     multi_channel_moving_block_energies(
         search_block,
@@ -238,7 +239,7 @@ fn compute_optimal_index(
         target_block, 0,
         channels,
         target_block_frames,
-        &mut energy_target_block,
+        energy_target_block,
     );
 
     let optimal_index = decimated_search(
@@ -249,8 +250,9 @@ fn compute_optimal_index(
         search_block,
         search_block_frames,
         channels,
-        &energy_target_block,
+        energy_target_block,
         energy_candidate_blocks,
+        dot_prod,
     );
 
     let lim_low = optimal_index.saturating_sub(search_decimation);
@@ -265,8 +267,9 @@ fn compute_optimal_index(
         search_block,
         search_block_frames,
         channels,
-        &energy_target_block,
+        energy_target_block,
         energy_candidate_blocks,
+        dot_prod,
     )
 }
 
@@ -302,6 +305,7 @@ fn multi_channel_moving_block_energies(
 
 fn peek_audio_with_zero_prepend(
     input_buffer: &[Vec<f32>],
+    start_idx: usize,
     channels: usize,
     read_offset_frames: isize,
     dest: &mut [Vec<f32>],
@@ -325,8 +329,9 @@ fn peek_audio_with_zero_prepend(
 
     if num_frames_to_read > 0 {
         for i in 0..channels {
+            let actual_start = (actual_read_offset as usize) + start_idx;
             dest[i][write_offset..write_offset + num_frames_to_read].copy_from_slice(
-                &input_buffer[i][actual_read_offset as usize..actual_read_offset as usize + num_frames_to_read]
+                &input_buffer[i][actual_start..actual_start + num_frames_to_read]
             );
         }
     }
@@ -363,12 +368,16 @@ struct WsolaState {
     search_block_size: usize,
     target_block: Vec<Vec<f32>>,
     input_buffer: Vec<Vec<f32>>,
+    input_buffer_start_idx: usize,
     
     input_buffer_final_frames: usize,
     input_buffer_added_silence: usize,
     energy_candidate_blocks: Vec<f32>,
     optimal_index: usize,
     is_final: bool,
+
+    energy_target_block: Vec<f32>,
+    dot_prod: Vec<f32>,
 }
 
 impl WsolaState {
@@ -403,6 +412,8 @@ impl WsolaState {
         let input_buffer = vec![Vec::with_capacity(initial_size); channels];
 
         let energy_candidate_blocks = vec![0.0_f32; channels * num_candidate_blocks];
+        let energy_target_block = vec![0.0_f32; channels];
+        let dot_prod = vec![0.0_f32; channels];
 
         WsolaState {
             min_playback_rate,
@@ -430,11 +441,14 @@ impl WsolaState {
             search_block_size,
             target_block,
             input_buffer,
+            input_buffer_start_idx: 0,
             input_buffer_final_frames: 0,
             input_buffer_added_silence: 0,
             energy_candidate_blocks,
             optimal_index: 0,
             is_final: false,
+            energy_target_block,
+            dot_prod,
         }
     }
 
@@ -443,6 +457,7 @@ impl WsolaState {
             self.input_buffer[ch].clear();
             self.wsola_output[ch].fill(0.0);
         }
+        self.input_buffer_start_idx = 0;
         self.input_buffer_final_frames = 0;
         self.input_buffer_added_silence = 0;
         self.output_time = 0.0;
@@ -455,7 +470,7 @@ impl WsolaState {
     }
 
     fn input_buffer_frames(&self) -> usize {
-        self.input_buffer[0].len()
+        self.input_buffer[0].len() - self.input_buffer_start_idx
     }
 
     fn seek_buffer(&mut self, frames: usize) {
@@ -463,9 +478,26 @@ impl WsolaState {
         if self.input_buffer_final_frames > 0 {
             self.input_buffer_final_frames = self.input_buffer_final_frames.saturating_sub(frames);
         }
-        for i in 0..self.channels {
-            self.input_buffer[i].drain(0..frames);
+        self.input_buffer_start_idx += frames;
+
+        // Amortized shift to prevent unbounded growth.
+        let threshold = 4096.max(2 * self.ola_window_size.max(self.search_block_size));
+        if self.input_buffer_start_idx >= threshold {
+            self.compact_input_buffer();
         }
+    }
+
+    fn compact_input_buffer(&mut self) {
+        if self.input_buffer_start_idx == 0 {
+            return;
+        }
+        let start = self.input_buffer_start_idx;
+        for i in 0..self.channels {
+            let len = self.input_buffer[i].len();
+            self.input_buffer[i].copy_within(start..len, 0);
+            self.input_buffer[i].truncate(len - start);
+        }
+        self.input_buffer_start_idx = 0;
     }
 
     fn set_final(&mut self) {
@@ -487,6 +519,7 @@ impl WsolaState {
             self.optimal_index = self.target_block_index as usize;
             peek_audio_with_zero_prepend(
                 &self.input_buffer,
+                self.input_buffer_start_idx,
                 self.channels,
                 self.target_block_index,
                 &mut self.optimal_block,
@@ -495,6 +528,7 @@ impl WsolaState {
         } else {
             peek_audio_with_zero_prepend(
                 &self.input_buffer,
+                self.input_buffer_start_idx,
                 self.channels,
                 self.target_block_index,
                 &mut self.target_block,
@@ -502,6 +536,7 @@ impl WsolaState {
             );
             peek_audio_with_zero_prepend(
                 &self.input_buffer,
+                self.input_buffer_start_idx,
                 self.channels,
                 self.search_block_index,
                 &mut self.search_block,
@@ -524,11 +559,14 @@ impl WsolaState {
                 &mut self.energy_candidate_blocks,
                 self.channels,
                 exclude_interval,
+                &mut self.energy_target_block,
+                &mut self.dot_prod,
             );
 
             optimal_index = (optimal_index as isize + self.search_block_index) as usize;
             peek_audio_with_zero_prepend(
                 &self.input_buffer,
+                self.input_buffer_start_idx,
                 self.channels,
                 optimal_index as isize,
                 &mut self.optimal_block,
@@ -659,8 +697,8 @@ impl WsolaState {
             for f in 0..rendered_frames {
                 dest[ch][dest_offset + f] = self.wsola_output[ch][f];
             }
-            self.wsola_output[ch].drain(0..rendered_frames);
-            self.wsola_output[ch].resize(self.wsola_output_size, 0.0);
+            self.wsola_output[ch].copy_within(rendered_frames..self.wsola_output_size, 0);
+            self.wsola_output[ch][self.wsola_output_size - rendered_frames..self.wsola_output_size].fill(0.0);
         }
 
         self.num_complete_frames -= rendered_frames;
@@ -674,9 +712,11 @@ impl WsolaState {
             return 0;
         }
 
+        let start_idx = self.input_buffer_start_idx;
         for i in 0..self.channels {
+            let actual_start = target_idx + start_idx;
             dest[i][0..frames_to_copy].copy_from_slice(
-                &self.input_buffer[i][target_idx..target_idx + frames_to_copy]
+                &self.input_buffer[i][actual_start..actual_start + frames_to_copy]
             );
         }
         self.seek_buffer(frames_to_copy);
@@ -750,6 +790,11 @@ where
     output_samples_pos: usize,
     
     inner_eof: bool,
+
+    // Reusable buffers to avoid allocations in `next()`
+    temp_buffer: Vec<Vec<f32>>,
+    temp_frame: Vec<f32>,
+    fill_dest: Vec<Vec<f32>>,
 }
 
 impl<I> Wsola<I>
@@ -763,6 +808,13 @@ where
         let min_playback_rate = 0.25;
         let max_playback_rate = 8.0;
         let speed = speed.clamp(min_playback_rate, max_playback_rate);
+
+        let channels_usize = channels.get() as usize;
+        let temp_buffer = vec![Vec::new(); channels_usize];
+        let temp_frame = vec![0.0; channels_usize];
+        let chunk_size = 256;
+        let fill_dest = vec![vec![0.0; chunk_size]; channels_usize];
+
         Self {
             input,
             speed,
@@ -776,6 +828,9 @@ where
             output_samples: Vec::new(),
             output_samples_pos: 0,
             inner_eof: false,
+            temp_buffer,
+            temp_frame,
+            fill_dest,
         }
     }
 
@@ -817,6 +872,12 @@ where
             wsola_search_interval_ms = wsola_search_interval_ms.max(1.0);
         }
 
+        let channels_usize = channels.get() as usize;
+        let temp_buffer = vec![Vec::new(); channels_usize];
+        let temp_frame = vec![0.0; channels_usize];
+        let chunk_size = 256;
+        let fill_dest = vec![vec![0.0; chunk_size]; channels_usize];
+
         Self {
             input,
             speed,
@@ -830,6 +891,9 @@ where
             output_samples: Vec::new(),
             output_samples_pos: 0,
             inner_eof: false,
+            temp_buffer,
+            temp_frame,
+            fill_dest,
         }
     }
 
@@ -903,16 +967,18 @@ where
             state.frames_needed(speed)
         };
 
-        let mut temp_buffer = vec![Vec::new(); channels];
+        for ch in 0..channels {
+            self.temp_buffer[ch].clear();
+        }
         let mut pulled_frames = 0;
 
         if needed > 0 && !self.inner_eof {
             for _ in 0..needed {
-                let mut frame = vec![0.0_f32; channels];
+                self.temp_frame.fill(0.0);
                 let mut read_ok = true;
                 for ch in 0..channels {
                     if let Some(sample) = self.input.next() {
-                        frame[ch] = sample as f32;
+                        self.temp_frame[ch] = sample as f32;
                     } else {
                         read_ok = false;
                         break;
@@ -921,7 +987,7 @@ where
 
                 if read_ok {
                     for ch in 0..channels {
-                        temp_buffer[ch].push(frame[ch]);
+                        self.temp_buffer[ch].push(self.temp_frame[ch]);
                     }
                     pulled_frames += 1;
                 } else {
@@ -932,10 +998,11 @@ where
         }
 
         let inner_eof = self.inner_eof;
-        let state = self.ensure_state();
+        self.ensure_state();
+        let state = self.state.as_mut().unwrap();
         if pulled_frames > 0 {
             for ch in 0..channels {
-                state.input_buffer[ch].extend_from_slice(&temp_buffer[ch]);
+                state.input_buffer[ch].extend_from_slice(&self.temp_buffer[ch]);
             }
         }
         if inner_eof {
@@ -943,14 +1010,13 @@ where
         }
 
         let chunk_size = 256;
-        let mut dest = vec![vec![0.0_f32; chunk_size]; channels];
-        let rendered_frames = state.fill_buffer(&mut dest, chunk_size, speed);
+        let rendered_frames = state.fill_buffer(&mut self.fill_dest, chunk_size, speed);
 
         if rendered_frames > 0 {
             self.output_samples.reserve(rendered_frames * channels);
             for f in 0..rendered_frames {
                 for ch in 0..channels {
-                    self.output_samples.push(dest[ch][f] as rodio::Sample);
+                    self.output_samples.push(self.fill_dest[ch][f] as rodio::Sample);
                 }
             }
             
@@ -1208,5 +1274,34 @@ mod tests {
         let hint = wsola.size_hint();
         // Since speed is 2.0 and input has 2000 samples, hint lower bound should be around 1000.
         assert!(hint.0 >= 990 && hint.0 <= 1010);
+    }
+
+    #[test]
+    fn test_amortized_compaction() {
+        // Create a large input (e.g. 60,000 stereo frames) to trigger compaction multiple times.
+        let mut samples = Vec::new();
+        for i in 0..60000 {
+            let val = (i as f32).sin() * 0.5;
+            samples.push(val);
+            samples.push(val);
+        }
+
+        let input = MockSource {
+            samples: samples.clone(),
+            pos: 0,
+            channels: 2,
+            sample_rate: 44100,
+        };
+
+        let mut wsola = Wsola::new(input, 1.5);
+        let mut output = Vec::new();
+        while let Some(sample) = wsola.next() {
+            output.push(sample);
+        }
+
+        // input has 120,000 samples. Output should be roughly 120,000 / 1.5 = 80,000 samples.
+        assert!(output.len() > 70000 && output.len() < 90000);
+        // Verify output contains non-silent samples (not corrupted/cleared incorrectly)
+        assert!(output.iter().any(|&x| x.abs() > 0.01));
     }
 }
