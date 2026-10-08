@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/axel10/rodio-wsola"
 categories = ["multimedia::audio"]
 keywords = ["rodio", "wsola", "time-stretch", "audio", "pitch"]
-
+rust-version = "1.90"
 
 [dependencies]
 rodio = { version = "0.22", default-features = false }

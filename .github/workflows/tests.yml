@@ -1,0 +1,120 @@
+name: Test Suites
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+
+      - name: Run cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run cargo fmt
+        run: cargo fmt --all --check
+        # Always run both "clippy" and "fmt", even if clippy fails, but not if any of the previous steps fail.
+        if: ${{ !cancelled() && steps.cache.conclusion == 'success' }}
+
+  test_linux:
+    name: Test Linux
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        rust: [stable, "1.90"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo check
+        run: cargo check
+
+      - name: Run cargo test
+        run: cargo test
+
+  # test_macos:
+  #   name: Test Mac
+  #   strategy:
+  #     matrix:
+  #       os: [macos-latest]
+  #       rust: [stable]
+  #       target: [aarch64-apple-darwin, x86_64-apple-darwin]
+  #   runs-on: ${{ matrix.os }}
+  #   timeout-minutes: 10
+  #   steps:
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v6
+  #       with:
+  #         persist-credentials: false
+
+  #     - name: Install stable toolchain
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         toolchain: ${{ matrix.rust }}
+  #         targets: ${{ matrix.target }}
+
+  #     - uses: Swatinem/rust-cache@v2
+  #       with:
+  #         key: ${{ matrix.target }}
+
+  #     - name: Run cargo check
+  #       run: cargo check --target ${{ matrix.target }}
+
+  #     - name: Run cargo test
+  #       run: cargo test --target ${{ matrix.target }}
+
+  # test-win:
+  #   name: Test Win
+  #   strategy:
+  #     matrix:
+  #       os: [windows-latest]
+  #       rust: [stable]
+  #   runs-on: ${{ matrix.os }}
+  #   timeout-minutes: 10
+  #   steps:
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v6
+  #       with:
+  #         persist-credentials: false
+
+  #     - name: Install stable toolchain
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         toolchain: ${{ matrix.rust }}
+
+  #     - uses: Swatinem/rust-cache@v2
+
+  #     - name: Run cargo check
+  #       run: cargo check
+
+  #     - name: Run cargo test
+  #       run: cargo test
