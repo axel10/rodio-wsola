@@ -5,8 +5,8 @@ use std::time::Duration;
 fn get_symmetric_hanning_window(window_length: usize) -> Vec<f32> {
     let mut window = vec![0.0_f32; window_length];
     let scale = 2.0 * std::f32::consts::PI / window_length as f32;
-    for n in 0..window_length {
-        window[n] = 0.5 * (1.0 - (n as f32 * scale).cos());
+    for (n, item) in window.iter_mut().enumerate() {
+        *item = 0.5 * (1.0 - (n as f32 * scale).cos());
     }
     window
 }
@@ -60,36 +60,38 @@ fn quadratic_interpolation(y_values: &[f32; 3], extremum: &mut f32, extremum_val
     }
 }
 
-fn decimated_search(
-    decimation: usize,
+/// Common parameters between the various search functions
+struct CommonSearchParams<'a> {
     exclude_interval: (isize, isize),
-    target_block: &[Vec<f32>],
+    target_block: &'a [Vec<f32>],
     target_block_frames: usize,
-    search_segment: &[Vec<f32>],
+    search_segment: &'a [Vec<f32>],
     search_segment_frames: usize,
     channels: usize,
-    energy_target_block: &[f32],
-    energy_candidate_blocks: &[f32],
-    dot_prod: &mut [f32],
-) -> usize {
-    let num_candidate_blocks = search_segment_frames - (target_block_frames - 1);
+    energy_target_block: &'a mut [f32],
+    energy_candidate_blocks: &'a mut [f32],
+    dot_prod: &'a mut [f32],
+}
+
+fn decimated_search(decimation: usize, common: &mut CommonSearchParams) -> usize {
+    let num_candidate_blocks = common.search_segment_frames - (common.target_block_frames - 1);
     let mut similarity = [0.0_f32; 3];
 
     let mut n = 0;
     dot_product_multi(
-        target_block,
+        common.target_block,
         0,
-        search_segment,
+        common.search_segment,
         n,
-        channels,
-        target_block_frames,
-        dot_prod,
+        common.channels,
+        common.target_block_frames,
+        common.dot_prod,
     );
     similarity[0] = similarity_measure(
-        dot_prod,
-        energy_target_block,
-        &energy_candidate_blocks[0..channels],
-        channels,
+        common.dot_prod,
+        common.energy_target_block,
+        &common.energy_candidate_blocks[0..common.channels],
+        common.channels,
     );
 
     let mut best_similarity = similarity[0];
@@ -101,19 +103,19 @@ fn decimated_search(
     }
 
     dot_product_multi(
-        target_block,
+        common.target_block,
         0,
-        search_segment,
+        common.search_segment,
         n,
-        channels,
-        target_block_frames,
-        dot_prod,
+        common.channels,
+        common.target_block_frames,
+        common.dot_prod,
     );
     similarity[1] = similarity_measure(
-        dot_prod,
-        energy_target_block,
-        &energy_candidate_blocks[n * channels..(n + 1) * channels],
-        channels,
+        common.dot_prod,
+        common.energy_target_block,
+        &common.energy_candidate_blocks[n * common.channels..(n + 1) * common.channels],
+        common.channels,
     );
 
     n += decimation;
@@ -127,19 +129,19 @@ fn decimated_search(
 
     while n < num_candidate_blocks {
         dot_product_multi(
-            target_block,
+            common.target_block,
             0,
-            search_segment,
+            common.search_segment,
             n,
-            channels,
-            target_block_frames,
-            dot_prod,
+            common.channels,
+            common.target_block_frames,
+            common.dot_prod,
         );
         similarity[2] = similarity_measure(
-            dot_prod,
-            energy_target_block,
-            &energy_candidate_blocks[n * channels..(n + 1) * channels],
-            channels,
+            common.dot_prod,
+            common.energy_target_block,
+            &common.energy_candidate_blocks[n * common.channels..(n + 1) * common.channels],
+            common.channels,
         );
 
         if (similarity[1] > similarity[0] && similarity[1] >= similarity[2])
@@ -156,15 +158,15 @@ fn decimated_search(
             let candidate_index = (n - decimation) as isize
                 + (normalized_candidate_index * decimation as f32 + 0.5).floor() as isize;
 
-            let in_exclude =
-                candidate_index >= exclude_interval.0 && candidate_index <= exclude_interval.1;
+            let in_exclude = candidate_index >= common.exclude_interval.0
+                && candidate_index <= common.exclude_interval.1;
             if candidate_similarity > best_similarity && !in_exclude {
                 optimal_index = (candidate_index.max(0) as usize).min(num_candidate_blocks - 1);
                 best_similarity = candidate_similarity;
             }
         } else if n + decimation >= num_candidate_blocks {
-            let in_exclude =
-                (n as isize) >= exclude_interval.0 && (n as isize) <= exclude_interval.1;
+            let in_exclude = (n as isize) >= common.exclude_interval.0
+                && (n as isize) <= common.exclude_interval.1;
             if similarity[2] > best_similarity && !in_exclude {
                 optimal_index = n.min(num_candidate_blocks - 1);
                 best_similarity = similarity[2];
@@ -179,43 +181,31 @@ fn decimated_search(
     optimal_index.min(num_candidate_blocks - 1)
 }
 
-fn full_search(
-    low_limit: usize,
-    high_limit: usize,
-    exclude_interval: (isize, isize),
-    target_block: &[Vec<f32>],
-    target_block_frames: usize,
-    search_block: &[Vec<f32>],
-    _search_block_frames: usize,
-    channels: usize,
-    energy_target_block: &[f32],
-    energy_candidate_blocks: &[f32],
-    dot_prod: &mut [f32],
-) -> usize {
+fn full_search(low_limit: usize, high_limit: usize, common: &mut CommonSearchParams) -> usize {
     let mut best_similarity = -f32::MAX;
     let mut optimal_index = 0;
 
     for n in low_limit..=high_limit {
         let n_isize = n as isize;
-        if n_isize >= exclude_interval.0 && n_isize <= exclude_interval.1 {
+        if n_isize >= common.exclude_interval.0 && n_isize <= common.exclude_interval.1 {
             continue;
         }
 
         dot_product_multi(
-            target_block,
+            common.target_block,
             0,
-            search_block,
+            common.search_segment,
             n,
-            channels,
-            target_block_frames,
-            dot_prod,
+            common.channels,
+            common.target_block_frames,
+            common.dot_prod,
         );
 
         let similarity = similarity_measure(
-            dot_prod,
-            energy_target_block,
-            &energy_candidate_blocks[n * channels..(n + 1) * channels],
-            channels,
+            common.dot_prod,
+            common.energy_target_block,
+            &common.energy_candidate_blocks[n * common.channels..(n + 1) * common.channels],
+            common.channels,
         );
 
         if similarity > best_similarity {
@@ -227,66 +217,33 @@ fn full_search(
     optimal_index
 }
 
-fn compute_optimal_index(
-    search_block: &[Vec<f32>],
-    search_block_frames: usize,
-    target_block: &[Vec<f32>],
-    target_block_frames: usize,
-    energy_candidate_blocks: &mut [f32],
-    channels: usize,
-    exclude_interval: (isize, isize),
-    energy_target_block: &mut [f32],
-    dot_prod: &mut [f32],
-) -> usize {
-    let num_candidate_blocks = search_block_frames - (target_block_frames - 1);
+fn compute_optimal_index(mut common: CommonSearchParams) -> usize {
+    let num_candidate_blocks = common.search_segment_frames - (common.target_block_frames - 1);
     let search_decimation = 5;
 
     multi_channel_moving_block_energies(
-        search_block,
-        channels,
-        target_block_frames,
-        energy_candidate_blocks,
+        common.search_segment,
+        common.channels,
+        common.target_block_frames,
+        common.energy_candidate_blocks,
     );
 
     dot_product_multi(
-        target_block,
+        common.target_block,
         0,
-        target_block,
+        common.target_block,
         0,
-        channels,
-        target_block_frames,
-        energy_target_block,
+        common.channels,
+        common.target_block_frames,
+        common.energy_target_block,
     );
 
-    let optimal_index = decimated_search(
-        search_decimation,
-        exclude_interval,
-        target_block,
-        target_block_frames,
-        search_block,
-        search_block_frames,
-        channels,
-        energy_target_block,
-        energy_candidate_blocks,
-        dot_prod,
-    );
+    let optimal_index = decimated_search(search_decimation, &mut common);
 
     let lim_low = optimal_index.saturating_sub(search_decimation);
     let lim_high = (optimal_index + search_decimation).min(num_candidate_blocks - 1);
 
-    full_search(
-        lim_low,
-        lim_high,
-        exclude_interval,
-        target_block,
-        target_block_frames,
-        search_block,
-        search_block_frames,
-        channels,
-        energy_target_block,
-        energy_candidate_blocks,
-        dot_prod,
-    )
+    full_search(lim_low, lim_high, &mut common)
 }
 
 fn multi_channel_moving_block_energies(
@@ -303,8 +260,7 @@ fn multi_channel_moving_block_energies(
 
         // First block of channel k.
         let mut sum = 0.0_f32;
-        for m in 0..frames_per_block {
-            let val = input_channel[m];
+        for val in input_channel.iter().take(frames_per_block) {
             sum += val * val;
         }
         energy[k] = sum;
@@ -337,8 +293,8 @@ fn peek_audio_with_zero_prepend(
         num_frames_to_read -= num_zero_frames_appended;
         write_offset = num_zero_frames_appended;
 
-        for ch in 0..channels {
-            dest[ch][0..num_zero_frames_appended].fill(0.0);
+        for dest in dest.iter_mut().take(channels) {
+            dest[0..num_zero_frames_appended].fill(0.0);
         }
     }
 
@@ -565,17 +521,17 @@ impl WsolaState {
                 last_optimal + exclude_interval_length_frames / 2,
             );
 
-            let mut optimal_index = compute_optimal_index(
-                &self.search_block,
-                self.search_block_size,
-                &self.target_block,
-                self.ola_window_size,
-                &mut self.energy_candidate_blocks,
-                self.channels,
+            let mut optimal_index = compute_optimal_index(CommonSearchParams {
+                search_segment: &self.search_block,
+                search_segment_frames: self.search_block_size,
+                target_block: &self.target_block,
+                target_block_frames: self.ola_window_size,
+                energy_candidate_blocks: &mut self.energy_candidate_blocks,
+                channels: self.channels,
                 exclude_interval,
-                &mut self.energy_target_block,
-                &mut self.dot_prod,
-            );
+                energy_target_block: &mut self.energy_target_block,
+                dot_prod: &mut self.dot_prod,
+            });
 
             optimal_index = (optimal_index as isize + self.search_block_index) as usize;
             peek_audio_with_zero_prepend(
@@ -708,6 +664,7 @@ impl WsolaState {
         self.search_block_index -= earliest_used_index;
     }
 
+    #[expect(clippy::needless_range_loop)]
     fn write_completed_frames_to(
         &mut self,
         requested_frames: usize,
@@ -740,9 +697,9 @@ impl WsolaState {
         }
 
         let start_idx = self.input_buffer_start_idx;
-        for i in 0..self.channels {
+        for (i, dest) in dest.iter_mut().take(self.channels).enumerate() {
             let actual_start = target_idx + start_idx;
-            dest[i][0..frames_to_copy].copy_from_slice(
+            dest[0..frames_to_copy].copy_from_slice(
                 &self.input_buffer[i][actual_start..actual_start + frames_to_copy],
             );
         }
@@ -1047,7 +1004,7 @@ where
                 let mut read_ok = true;
                 for ch in 0..channels {
                     if let Some(sample) = self.input.next() {
-                        self.temp_frame[ch] = sample as f32;
+                        self.temp_frame[ch] = sample;
                     } else {
                         read_ok = false;
                         break;
@@ -1311,12 +1268,12 @@ mod tests {
         };
 
         // Create Wsola with speed 10.0 (max is 8.0 by default)
-        let mut wsola = Wsola::new(input, 10.0);
+        let wsola = Wsola::new(input, 10.0);
         assert_eq!(wsola.playback_speed(), 8.0); // Clamped to max
 
         // Verify it runs and produces samples instead of silence or panic
         let mut count = 0;
-        while let Some(_) = wsola.next() {
+        for _ in wsola {
             count += 1;
         }
         assert!(count > 0);
@@ -1334,9 +1291,9 @@ mod tests {
             new_channels: 1,
         };
 
-        let mut wsola = Wsola::new(input, 1.5);
+        let wsola = Wsola::new(input, 1.5);
         // This will process samples and eventually panic when it crosses change_at
-        while let Some(_) = wsola.next() {}
+        for _ in wsola {}
     }
 
     #[test]
@@ -1372,9 +1329,9 @@ mod tests {
             sample_rate: 44100,
         };
 
-        let mut wsola = Wsola::new(input, 1.5);
+        let wsola = Wsola::new(input, 1.5);
         let mut output = Vec::new();
-        while let Some(sample) = wsola.next() {
+        for sample in wsola {
             output.push(sample);
         }
 
