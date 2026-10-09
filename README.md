@@ -98,6 +98,7 @@ let custom_source = Wsola::with_params(
 ```
 
 #### Parameter Guidelines:
+
 - **OLA Window Size (`ola_window_size_ms`)**: Usually between 10ms and 20ms. Smaller windows reduce processing latency but can introduce audio artifacts in low-frequency sounds.
 - **Search Interval (`wsola_search_interval_ms`)**: Controls the search range for finding overlapping segments. Typically 30ms to 60ms.
 
